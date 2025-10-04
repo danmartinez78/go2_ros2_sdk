@@ -37,6 +37,7 @@ setup(
     entry_points={
         'console_scripts': [
             'go2_driver_node = go2_robot_sdk.main:main',
+            'dimos_integration_bridge = go2_robot_sdk.dimos_integration_bridge:main',
         ],
     },
 )
