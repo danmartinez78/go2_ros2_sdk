@@ -11,6 +11,7 @@
 #include <mutex>
 #include <atomic>
 #include <thread>
+#include <queue>
 
 #include "rclcpp/rclcpp.hpp"
 #include "sensor_msgs/msg/point_cloud2.hpp"
@@ -52,17 +53,38 @@ struct Point3DHash
 {
   std::size_t operator()(const Point3D& p) const 
   {
-    // Round to 3 decimal places for hashing
-    int x_int = static_cast<int>(std::round(p.x * 1000));
-    int y_int = static_cast<int>(std::round(p.y * 1000));
-    int z_int = static_cast<int>(std::round(p.z * 1000));
+    // Optimized hash function for better distribution
+    // Use bit mixing for better hash distribution
+    uint32_t x_bits = *reinterpret_cast<const uint32_t*>(&p.x);
+    uint32_t y_bits = *reinterpret_cast<const uint32_t*>(&p.y);
+    uint32_t z_bits = *reinterpret_cast<const uint32_t*>(&p.z);
     
-    return std::hash<long long>{}(
-      (static_cast<long long>(x_int) << 32) | 
-      (static_cast<long long>(y_int) << 16) | 
-      static_cast<long long>(z_int)
-    );
+    uint64_t hash = (uint64_t(x_bits) << 32) | y_bits;
+    hash ^= z_bits + 0x9e3779b9 + (hash << 6) + (hash >> 2);
+    
+    return static_cast<std::size_t>(hash);
   }
+};
+
+// Memory pool for PCL point clouds to reduce allocations
+class PointCloudPool
+{
+public:
+  using PointCloudPtr = pcl::PointCloud<pcl::PointXYZ>::Ptr;
+  
+  PointCloudPool(size_t initial_size = 10);
+  ~PointCloudPool() = default;
+  
+  PointCloudPtr acquire();
+  void release(PointCloudPtr cloud);
+  size_t getPoolSize() const;
+  
+private:
+  std::queue<PointCloudPtr> available_clouds_;
+  mutable std::mutex pool_mutex_;
+  std::atomic<size_t> total_created_{0};
+  
+  PointCloudPtr createNewCloud();
 };
 
 class PointCloudAggregator
@@ -75,12 +97,23 @@ public:
   bool hasChanges() const;
   void markSaved();
   int getPointCount() const;
+  
+  // Performance optimizations
+  void reserveCapacity(size_t capacity);
+  void addPointsOptimized(const pcl::PointCloud<pcl::PointXYZ>::ConstPtr& cloud);
 
 private:
   LidarConfig config_;
   std::unordered_set<Point3D, Point3DHash> points_;
   mutable std::mutex points_mutex_;
   std::atomic<bool> points_changed_;
+  
+  // Performance optimization: track insertion order for efficient cleanup
+  std::vector<Point3D> insertion_order_;
+  size_t next_cleanup_index_{0};
+  
+  void performEfficientCleanup();
+  Point3D roundPoint(const Point3D& point) const noexcept;
 };
 
 class LidarToPointCloudNode : public rclcpp::Node
@@ -100,6 +133,7 @@ private:
 
   LidarConfig config_;
   std::unique_ptr<PointCloudAggregator> aggregator_;
+  std::unique_ptr<PointCloudPool> point_cloud_pool_;
   
   std::vector<rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr> subscriptions_;
   rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pointcloud_pub_;

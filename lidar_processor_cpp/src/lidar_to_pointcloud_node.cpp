@@ -8,44 +8,153 @@
 namespace lidar_processor_cpp
 {
 
+// PointCloudPool implementation
+PointCloudPool::PointCloudPool(size_t initial_size)
+{
+  for (size_t i = 0; i < initial_size; ++i) {
+    available_clouds_.push(createNewCloud());
+  }
+}
+
+PointCloudPool::PointCloudPtr PointCloudPool::acquire()
+{
+  std::lock_guard<std::mutex> lock(pool_mutex_);
+  
+  if (available_clouds_.empty()) {
+    return createNewCloud();
+  }
+  
+  auto cloud = available_clouds_.front();
+  available_clouds_.pop();
+  cloud->clear();  // Reset the cloud for reuse
+  return cloud;
+}
+
+void PointCloudPool::release(PointCloudPtr cloud)
+{
+  if (!cloud) return;
+  
+  std::lock_guard<std::mutex> lock(pool_mutex_);
+  
+  // Only keep a reasonable number of clouds in the pool
+  if (available_clouds_.size() < 20) {
+    cloud->clear();
+    available_clouds_.push(cloud);
+  }
+}
+
+size_t PointCloudPool::getPoolSize() const
+{
+  std::lock_guard<std::mutex> lock(pool_mutex_);
+  return available_clouds_.size();
+}
+
+PointCloudPool::PointCloudPtr PointCloudPool::createNewCloud()
+{
+  total_created_++;
+  auto cloud = std::make_shared<pcl::PointCloud<pcl::PointXYZ>>();
+  cloud->reserve(10000);  // Pre-allocate space for better performance
+  return cloud;
+}
+
+// PointCloudAggregator optimized implementation
 PointCloudAggregator::PointCloudAggregator(const LidarConfig& config)
   : config_(config), points_changed_(false)
 {
+  // Pre-allocate capacity for better performance
+  points_.reserve(config_.max_points * 1.2);  // 20% extra capacity
+  insertion_order_.reserve(config_.max_points * 1.2);
 }
 
 void PointCloudAggregator::addPoints(const std::vector<Point3D>& new_points)
 {
   std::lock_guard<std::mutex> lock(points_mutex_);
   
+  // Batch process points for better performance
   for (const auto& point : new_points) {
-    // Round points to reduce memory usage
-    Point3D rounded_point(
-      std::round(point.x * 1000.0f) / 1000.0f,
-      std::round(point.y * 1000.0f) / 1000.0f,
-      std::round(point.z * 1000.0f) / 1000.0f
-    );
-    points_.insert(rounded_point);
-  }
-  
-  // Memory management - remove oldest points if exceeding limit
-  if (static_cast<int>(points_.size()) > config_.max_points) {
-    std::vector<Point3D> points_vector(points_.begin(), points_.end());
+    Point3D rounded_point = roundPoint(point);
     
-    // Sort by distance from origin, keep closest points
-    std::sort(points_vector.begin(), points_vector.end(),
-      [](const Point3D& a, const Point3D& b) {
-        float dist_a = a.x * a.x + a.y * a.y + a.z * a.z;
-        float dist_b = b.x * b.x + b.y * b.y + b.z * b.z;
-        return dist_a < dist_b;
-      });
-    
-    points_.clear();
-    for (int i = 0; i < config_.max_points && i < static_cast<int>(points_vector.size()); ++i) {
-      points_.insert(points_vector[i]);
+    // Use insert result to avoid duplicate processing
+    auto [it, inserted] = points_.insert(rounded_point);
+    if (inserted) {
+      insertion_order_.push_back(rounded_point);
     }
   }
   
+  // Efficient cleanup when exceeding limit
+  if (static_cast<int>(points_.size()) > config_.max_points) {
+    performEfficientCleanup();
+  }
+  
   points_changed_ = true;
+}
+
+void PointCloudAggregator::addPointsOptimized(const pcl::PointCloud<pcl::PointXYZ>::ConstPtr& cloud)
+{
+  std::lock_guard<std::mutex> lock(points_mutex_);
+  
+  // Direct PCL cloud processing for better performance
+  for (const auto& pcl_point : cloud->points) {
+    if (!std::isfinite(pcl_point.x) || !std::isfinite(pcl_point.y) || !std::isfinite(pcl_point.z)) {
+      continue;
+    }
+    
+    Point3D rounded_point = roundPoint({pcl_point.x, pcl_point.y, pcl_point.z});
+    
+    auto [it, inserted] = points_.insert(rounded_point);
+    if (inserted) {
+      insertion_order_.push_back(rounded_point);
+    }
+  }
+  
+  if (static_cast<int>(points_.size()) > config_.max_points) {
+    performEfficientCleanup();
+  }
+  
+  points_changed_ = true;
+}
+
+Point3D PointCloudAggregator::roundPoint(const Point3D& point) const noexcept
+{
+  // Optimized rounding using bit manipulation
+  constexpr float scale = 1000.0f;
+  constexpr float inv_scale = 1.0f / scale;
+  
+  return Point3D(
+    std::round(point.x * scale) * inv_scale,
+    std::round(point.y * scale) * inv_scale,
+    std::round(point.z * scale) * inv_scale
+  );
+}
+
+void PointCloudAggregator::performEfficientCleanup()
+{
+  // Instead of expensive sorting, use FIFO cleanup
+  size_t target_size = config_.max_points * 0.8;  // Keep 80% after cleanup
+  size_t points_to_remove = points_.size() - target_size;
+  
+  for (size_t i = 0; i < points_to_remove && next_cleanup_index_ < insertion_order_.size(); ++i) {
+    points_.erase(insertion_order_[next_cleanup_index_]);
+    next_cleanup_index_++;
+  }
+  
+  // Reset if we've processed most of the insertion order
+  if (next_cleanup_index_ > insertion_order_.size() * 0.5) {
+    // Rebuild insertion order with current points
+    insertion_order_.clear();
+    insertion_order_.reserve(points_.size());
+    for (const auto& point : points_) {
+      insertion_order_.push_back(point);
+    }
+    next_cleanup_index_ = 0;
+  }
+}
+
+void PointCloudAggregator::reserveCapacity(size_t capacity)
+{
+  std::lock_guard<std::mutex> lock(points_mutex_);
+  points_.reserve(capacity);
+  insertion_order_.reserve(capacity);
 }
 
 std::vector<Point3D> PointCloudAggregator::getPointsCopy() const
@@ -77,8 +186,12 @@ LidarToPointCloudNode::LidarToPointCloudNode()
   declareParameters();
   config_ = loadConfiguration();
   
-  // Initialize components
+  // Initialize components with performance optimizations
   aggregator_ = std::make_unique<PointCloudAggregator>(config_);
+  point_cloud_pool_ = std::make_unique<PointCloudPool>(15);  // Pool of 15 clouds
+  
+  // Pre-allocate aggregator capacity
+  aggregator_->reserveCapacity(config_.max_points);
   
   // Setup subscriptions and publishers
   setupSubscriptions();
@@ -94,6 +207,8 @@ LidarToPointCloudNode::LidarToPointCloudNode()
   
   // Log configuration
   logConfiguration();
+  
+  RCLCPP_INFO(this->get_logger(), "🚀 LiDAR Node initialized with performance optimizations");
 }
 
 void LidarToPointCloudNode::declareParameters()
@@ -164,22 +279,15 @@ void LidarToPointCloudNode::setupPublishers()
 void LidarToPointCloudNode::lidarCallback(const sensor_msgs::msg::PointCloud2::SharedPtr msg)
 {
   try {
-    // Convert ROS message to PCL point cloud
-    pcl::PointCloud<pcl::PointXYZ>::Ptr cloud(new pcl::PointCloud<pcl::PointXYZ>);
+    // Use memory pool for better performance
+    auto cloud = point_cloud_pool_->acquire();
     pcl::fromROSMsg(*msg, *cloud);
     
-    // Extract points
-    std::vector<Point3D> points;
-    points.reserve(cloud->points.size());
+    // Use optimized direct PCL processing
+    aggregator_->addPointsOptimized(cloud);
     
-    for (const auto& pcl_point : cloud->points) {
-      if (std::isfinite(pcl_point.x) && std::isfinite(pcl_point.y) && std::isfinite(pcl_point.z)) {
-        points.emplace_back(pcl_point.x, pcl_point.y, pcl_point.z);
-      }
-    }
-    
-    // Add to aggregator
-    aggregator_->addPoints(points);
+    // Return cloud to pool
+    point_cloud_pool_->release(cloud);
     
     // Publish aggregated point cloud
     publishAggregatedPointcloud(msg->header);
@@ -197,8 +305,8 @@ void LidarToPointCloudNode::publishAggregatedPointcloud(const std_msgs::msg::Hea
       return;
     }
     
-    // Create PCL point cloud
-    pcl::PointCloud<pcl::PointXYZ>::Ptr cloud(new pcl::PointCloud<pcl::PointXYZ>);
+    // Use memory pool for publishing
+    auto cloud = point_cloud_pool_->acquire();
     cloud->points.reserve(points.size());
     
     for (const auto& point : points) {
@@ -215,6 +323,9 @@ void LidarToPointCloudNode::publishAggregatedPointcloud(const std_msgs::msg::Hea
     pointcloud_msg.header = header;
     
     pointcloud_pub_->publish(pointcloud_msg);
+    
+    // Return cloud to pool
+    point_cloud_pool_->release(cloud);
     
   } catch (const std::exception& e) {
     RCLCPP_ERROR(this->get_logger(), "Error publishing point cloud: %s", e.what());
@@ -233,8 +344,8 @@ void LidarToPointCloudNode::saveMapCallback()
       return;
     }
     
-    // Create PCL point cloud
-    pcl::PointCloud<pcl::PointXYZ>::Ptr cloud(new pcl::PointCloud<pcl::PointXYZ>);
+    // Use memory pool for saving
+    auto cloud = point_cloud_pool_->acquire();
     cloud->points.reserve(points.size());
     
     for (const auto& point : points) {
@@ -247,11 +358,14 @@ void LidarToPointCloudNode::saveMapCallback()
     
     // Apply voxel downsampling for saving
     if (config_.voxel_size > 0) {
-      pcl::PointCloud<pcl::PointXYZ>::Ptr downsampled_cloud(new pcl::PointCloud<pcl::PointXYZ>);
+      auto downsampled_cloud = point_cloud_pool_->acquire();
       pcl::VoxelGrid<pcl::PointXYZ> voxel_filter;
       voxel_filter.setInputCloud(cloud);
       voxel_filter.setLeafSize(config_.voxel_size, config_.voxel_size, config_.voxel_size);
       voxel_filter.filter(*downsampled_cloud);
+      
+      // Return original cloud to pool, use downsampled one
+      point_cloud_pool_->release(cloud);
       cloud = downsampled_cloud;
     }
     
@@ -268,6 +382,9 @@ void LidarToPointCloudNode::saveMapCallback()
     } else {
       RCLCPP_ERROR(this->get_logger(), "Failed to save map: %s", map_filename.c_str());
     }
+    
+    // Return cloud to pool
+    point_cloud_pool_->release(cloud);
     
   } catch (const std::exception& e) {
     RCLCPP_ERROR(this->get_logger(), "Error saving map: %s", e.what());
