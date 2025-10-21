@@ -11,6 +11,7 @@ class RobotConfig:
     robot_ip_list: List[str]
     token: str
     conn_type: str
+    robot_namespace: str  # Optional namespace for topics (e.g., 'tachi', 'ghost')
     enable_video: bool
     decode_lidar: bool
     publish_raw_voxel: bool
@@ -20,7 +21,8 @@ class RobotConfig:
     @classmethod
     def from_params(cls, robot_ip: str, token: str, conn_type: str, 
                    enable_video: bool, decode_lidar: bool, 
-                   publish_raw_voxel: bool, obstacle_avoidance: bool):
+                   publish_raw_voxel: bool, obstacle_avoidance: bool,
+                   robot_namespace: str = ""):
         """Создание конфигурации из параметров"""
         robot_ip_list = robot_ip.replace(" ", "").split(",")
         conn_mode = "single" if (
@@ -30,6 +32,7 @@ class RobotConfig:
             robot_ip_list=robot_ip_list,
             token=token,
             conn_type=conn_type,
+            robot_namespace=robot_namespace,
             enable_video=enable_video,
             decode_lidar=decode_lidar,
             publish_raw_voxel=publish_raw_voxel,

@@ -87,6 +87,7 @@ class Go2DriverNode(Node):
                 ('robot_ip', robot_ip),
                 ('token', token),
                 ('conn_type', conn_type),
+                ('robot_namespace', ''),
                 ('enable_video', True),
                 ('decode_lidar', True),
                 ('publish_raw_voxel', False),
@@ -101,6 +102,7 @@ class Go2DriverNode(Node):
             robot_ip=self.get_parameter('robot_ip').get_parameter_value().string_value,
             token=self.get_parameter('token').get_parameter_value().string_value,
             conn_type=self.get_parameter('conn_type').get_parameter_value().string_value,
+            robot_namespace=self.get_parameter('robot_namespace').get_parameter_value().string_value,
             enable_video=self.get_parameter('enable_video').get_parameter_value().bool_value,
             decode_lidar=self.get_parameter('decode_lidar').get_parameter_value().bool_value,
             publish_raw_voxel=self.get_parameter('publish_raw_voxel').get_parameter_value().bool_value,
@@ -141,18 +143,19 @@ class Go2DriverNode(Node):
         num_robots = len(self.config.robot_ip_list)
         
         for i in range(num_robots):
-            # Define topics depending on connection mode
-            if self.config.conn_mode == 'single':
-                joint_topic = 'joint_states'
-                robot_state_topic = 'go2_states'
-                lidar_topic = 'point_cloud2'
-                odom_topic = 'odom'
-                imu_topic = 'imu'
-                camera_topic = 'camera/image_raw'
-                camera_info_topic = 'camera/camera_info'
-                voxel_topic = '/utlidar/voxel_map_compressed'
+            # Define topics depending on connection mode and namespace
+            if self.config.robot_namespace:
+                # Custom namespace mode (e.g., 'tachi', 'ghost', 'motoko')
+                prefix = self.config.robot_namespace
+            elif self.config.conn_mode == 'single':
+                # Legacy single-robot mode (no prefix)
+                prefix = ''
             else:
+                # Legacy multi-robot mode (robot0, robot1, robot2)
                 prefix = f'robot{i}'
+            
+            # Build topic names with prefix
+            if prefix:
                 joint_topic = f'{prefix}/joint_states'
                 robot_state_topic = f'{prefix}/go2_states'
                 lidar_topic = f'{prefix}/point_cloud2'
@@ -161,6 +164,15 @@ class Go2DriverNode(Node):
                 camera_topic = f'{prefix}/camera/image_raw'
                 camera_info_topic = f'{prefix}/camera/camera_info'
                 voxel_topic = f'{prefix}/utlidar/voxel_map_compressed'
+            else:
+                joint_topic = 'joint_states'
+                robot_state_topic = 'go2_states'
+                lidar_topic = 'point_cloud2'
+                odom_topic = 'odom'
+                imu_topic = 'imu'
+                camera_topic = 'camera/image_raw'
+                camera_info_topic = 'camera/camera_info'
+                voxel_topic = '/utlidar/voxel_map_compressed'
 
             # Create publishers
             publishers['joint_state'].append(
@@ -199,14 +211,29 @@ class Go2DriverNode(Node):
         # Command subscribers
         num_robots = len(self.config.robot_ip_list)
         
-        if self.config.conn_mode == 'single':
+        # Determine prefix/namespace to use
+        if self.config.robot_namespace:
+            # Custom namespace mode
+            prefix = self.config.robot_namespace
+        elif self.config.conn_mode == 'single':
+            # Legacy single-robot mode (no prefix)
+            prefix = ''
+        else:
+            # Legacy multi-robot mode will be handled per-robot in loop
+            prefix = None
+        
+        if prefix is not None:
+            # Single namespace (custom or legacy single mode)
+            cmd_vel_topic = f'{prefix}/cmd_vel_out' if prefix else 'cmd_vel_out'
+            webrtc_topic = f'{prefix}/webrtc_req' if prefix else 'webrtc_req'
             self.create_subscription(
-                Twist, 'cmd_vel_out',
+                Twist, cmd_vel_topic,
                 lambda msg: self._on_cmd_vel(msg, "0"), qos_profile)
             self.create_subscription(
-                WebRtcReq, 'webrtc_req',
+                WebRtcReq, webrtc_topic,
                 lambda msg: self._on_webrtc_req(msg, "0"), qos_profile)
         else:
+            # Legacy multi-robot mode (robot0, robot1, robot2)
             for i in range(num_robots):
                 self.create_subscription(
                     Twist, f'robot{i}/cmd_vel_out',

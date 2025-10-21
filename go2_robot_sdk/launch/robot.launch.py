@@ -80,6 +80,7 @@ class Go2NodeFactory:
     def create_launch_arguments(self) -> List[DeclareLaunchArgument]:
         """Create all launch arguments"""
         return [
+            DeclareLaunchArgument('robot_namespace', default_value='', description='Robot namespace (e.g., tachi, ghost, motoko)'),
             DeclareLaunchArgument('rviz2', default_value='true', description='Launch RViz2'),
             DeclareLaunchArgument('nav2', default_value='true', description='Launch Nav2'),
             DeclareLaunchArgument('slam', default_value='true', description='Launch SLAM'),
@@ -178,6 +179,8 @@ class Go2NodeFactory:
     
     def create_core_nodes(self) -> List[Node]:
         """Create core Go2 robot nodes"""
+        robot_namespace = LaunchConfiguration('robot_namespace', default='')
+        
         return [
             # Main robot driver (clean architecture)
             Node(
@@ -188,7 +191,8 @@ class Go2NodeFactory:
                 parameters=[{
                     'robot_ip': self.config.robot_ip,
                     'token': self.config.robot_token,
-                    'conn_type': self.config.conn_type
+                    'conn_type': self.config.conn_type,
+                    'robot_namespace': robot_namespace
                 }],
             ),
             # LiDAR processing node (new separate package)
